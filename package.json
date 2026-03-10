@@ -1,0 +1,42 @@
+{
+  "name": "dotcode-gui",
+  "version": "1.0.0",
+  "main": "main.js",
+  "description": "DotCode GUI Advanced",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "dependencies": {
+    "bwip-js": "^4.6.0",
+    "pdfkit": "^0.15.0",
+    "sharp": "^0.33.5",
+    "svg-to-pdfkit": "^0.1.8"
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.dotcode.gui",
+    "productName": "DotCodeGUI",
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "renderer.js",
+      "node_modules/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "DotCodeGUI.exe"
+    },
+    "compression": "maximum"
+  }
+}
