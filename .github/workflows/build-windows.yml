@@ -11,7 +11,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js 18
         uses: actions/setup-node@v4
         with:
           node-version: 18
@@ -19,14 +19,12 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      # Necesario para electron-builder + sharp en Windows
       - name: Rebuild native modules
         run: npx electron-builder install-app-deps
 
       - name: Build portable executable
         run: npm run dist
 
-      # Subir SOLO el exe portable (no toda la carpeta dist)
       - name: Upload portable EXE
         uses: actions/upload-artifact@v4
         with:
