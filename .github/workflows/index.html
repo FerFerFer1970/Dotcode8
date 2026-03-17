@@ -26,6 +26,21 @@
     .threeCol { display:grid; grid-template-columns: 1fr 1fr 1fr; gap:10px; }
     .chip { display:flex; align-items:center; gap:8px; }
     .hr { height:1px; background:#eee; margin: 12px 0; }
+    .metrics {
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:8px 16px;
+      border:1px solid #eee;
+      border-radius:10px;
+      padding:10px;
+      background:#fafafa;
+      font-size:13px;
+    }
+    .metrics div span {
+      color:#666;
+      display:inline-block;
+      min-width:130px;
+    }
   </style>
 </head>
 <body>
@@ -83,6 +98,64 @@
             <div class="muted">Aplicar también al base</div>
             <label class="chip" style="margin-top:10px;"><input id="outerOnBase" type="checkbox" checked /> Sí</label>
           </div>
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Geometría física de la cuadrícula</label>
+
+        <div class="threeCol">
+          <div>
+            <div class="muted">Tamaño de celda (mm)</div>
+            <input id="cellSizeMm" type="number" value="1.0" min="0.01" max="50" step="0.01" />
+          </div>
+          <div>
+            <div class="muted">Ancho total cuadrícula (mm)</div>
+            <input id="gridWidthMm" type="number" value="0" min="0" max="1000" step="0.01" />
+          </div>
+          <div>
+            <div class="muted">Alto total cuadrícula (mm)</div>
+            <input id="gridHeightMm" type="number" value="0" min="0" max="1000" step="0.01" />
+          </div>
+        </div>
+
+        <div class="muted" style="margin-top:6px;">
+          Si ancho/alto total son 0, se usan filas/columnas × tamaño de celda.
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Desplazamiento de dots dentro de la celda</label>
+
+        <div class="threeCol">
+          <div>
+            <div class="muted">Offset X dot (mm)</div>
+            <input id="dotOffsetXmm" type="number" value="0" min="-50" max="50" step="0.01" />
+          </div>
+          <div>
+            <div class="muted">Offset Y dot (mm)</div>
+            <input id="dotOffsetYmm" type="number" value="0" min="-50" max="50" step="0.01" />
+          </div>
+          <div>
+            <div class="muted">Diámetro dot (fracción celda)</div>
+            <input id="dotDiameterRatio" type="number" value="0.75" min="0.05" max="1.5" step="0.01" />
+          </div>
+        </div>
+
+        <div class="muted" style="margin-top:6px;">
+          0,0 = centro de la celda. Valores positivos desplazan a derecha/abajo.
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Resumen geométrico</label>
+        <div class="metrics">
+          <div><span>Columnas totales:</span> <strong id="metricCols">-</strong></div>
+          <div><span>Filas totales:</span> <strong id="metricRows">-</strong></div>
+          <div><span>Ancho final (mm):</span> <strong id="metricWidthMm">-</strong></div>
+          <div><span>Alto final (mm):</span> <strong id="metricHeightMm">-</strong></div>
+          <div><span>Ancho final (px):</span> <strong id="metricWidthPx">-</strong></div>
+          <div><span>Alto final (px):</span> <strong id="metricHeightPx">-</strong></div>
         </div>
       </div>
 

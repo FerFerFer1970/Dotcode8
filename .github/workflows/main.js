@@ -19,10 +19,13 @@ function safeFilePart(s) {
   return String(s).replace(/[<>:"/\\|?*\x00-\x1F]/g, '_');
 }
 
+function mmToPx(mm, dpi) {
+  return (Number(mm) / 25.4) * Number(dpi);
+}
+
 function forceSvgSize(svg, sizePx) {
   const size = Number(sizePx);
   if (!Number.isFinite(size) || size <= 0) return svg;
-
   let out = svg.replace(/\swidth="[^"]*"/, '').replace(/\sheight="[^"]*"/, '');
   out = out.replace(/<svg\b/, `<svg width="${size}" height="${size}"`);
   return out;
@@ -45,44 +48,34 @@ function loadSettingsSafe() {
 function saveSettingsSafe(obj) {
   try {
     fs.writeFileSync(getUserDataFile(), JSON.stringify(obj, null, 2), 'utf8');
-  } catch {
-    // ignore
-  }
+  } catch {}
 }
 
 function generateBaseSvg(opts) {
   const { payload, useGs1, scale, padding, finalSize } = opts;
-
   const baseSvgRaw = bwipjs.toSVG({
     bcid: useGs1 ? 'gs1dotcode' : 'dotcode',
     text: String(payload ?? '').trim(),
     scale: Number(scale) || 4,
     padding: Number(padding) || 10,
   });
-
   return forceSvgSize(baseSvgRaw, finalSize);
 }
 
 function extractGridFromBaseSvg(baseSvg) {
   const dMatch = baseSvg.match(/<path[^>]*\sd="([^"]+)"[^>]*\/>/);
-  if (!dMatch) {
-    throw new Error('No se encontró <path d="..."/> en el SVG base.');
-  }
+  if (!dMatch) throw new Error('No se encontró <path d="..."/> en el SVG base.');
   const d = dMatch[1];
 
   const re = /M\s*([0-9.]+)\s*([0-9.]+)\s*C/g;
   const dots = [];
   let m;
-
   while ((m = re.exec(d)) !== null) {
     const xLeft = parseFloat(m[1]);
     const y = parseFloat(m[2]);
     dots.push({ x: xLeft + DOT_RADIUS, y });
   }
-
-  if (!dots.length) {
-    throw new Error('No se detectaron dots en el símbolo.');
-  }
+  if (!dots.length) throw new Error('No se detectaron dots en el símbolo.');
 
   const xs = [...new Set(dots.map(p => p.x))].sort((a, b) => a - b);
   const ys = [...new Set(dots.map(p => p.y))].sort((a, b) => a - b);
@@ -106,10 +99,8 @@ function expandGrid(xs, ys, dx, dy, outerCols, outerRows) {
     const lastX = xs[xs.length - 1];
     const extraLeft = [];
     const extraRight = [];
-
     for (let i = cols; i >= 1; i--) extraLeft.push(firstX - (dx * i));
     for (let i = 1; i <= cols; i++) extraRight.push(lastX + (dx * i));
-
     newXs = [...extraLeft, ...xs, ...extraRight];
   }
 
@@ -118,14 +109,73 @@ function expandGrid(xs, ys, dx, dy, outerCols, outerRows) {
     const lastY = ys[ys.length - 1];
     const extraTop = [];
     const extraBottom = [];
-
     for (let i = rows; i >= 1; i--) extraTop.push(firstY - (dy * i));
     for (let i = 1; i <= rows; i++) extraBottom.push(lastY + (dy * i));
-
     newYs = [...extraTop, ...ys, ...extraBottom];
   }
 
   return { xs: newXs, ys: newYs };
+}
+
+function computePhysicalGrid(xs, ys, opts) {
+  const cols = xs.length;
+  const rows = ys.length;
+
+  let cellW = Number(opts.cellSizeMm) || 1.0;
+  let cellH = Number(opts.cellSizeMm) || 1.0;
+
+  const totalW = Number(opts.gridWidthMm) || 0;
+  const totalH = Number(opts.gridHeightMm) || 0;
+
+  if (totalW > 0) cellW = totalW / cols;
+  if (totalH > 0) cellH = totalH / rows;
+
+  const widthMm = totalW > 0 ? totalW : cols * cellW;
+  const heightMm = totalH > 0 ? totalH : rows * cellH;
+
+  return {
+    cols,
+    rows,
+    cellW,
+    cellH,
+    widthMm,
+    heightMm,
+  };
+}
+
+function buildPhysicalCellCenters(xs, ys, opts) {
+  const grid = computePhysicalGrid(xs, ys, opts);
+  const centersX = [];
+  const centersY = [];
+
+  for (let i = 0; i < grid.cols; i++) {
+    centersX.push((i * grid.cellW) + (grid.cellW / 2));
+  }
+  for (let j = 0; j < grid.rows; j++) {
+    centersY.push((j * grid.cellH) + (grid.cellH / 2));
+  }
+
+  return { ...grid, centersX, centersY };
+}
+
+function buildMetrics(opts, payload) {
+  const baseSvg = generateBaseSvg({ ...opts, payload });
+  const grid = extractGridFromBaseSvg(baseSvg);
+  const expanded = expandGrid(grid.xs, grid.ys, grid.dx, grid.dy, opts.outerCols, opts.outerRows);
+  const physical = buildPhysicalCellCenters(expanded.xs, expanded.ys, opts);
+  const dpi = Number(opts.outputDpi) || 300;
+  const legendExtraMm = opts.printPayloadLegend
+    ? ((Number(opts.legendFontSize) || 14) * 0.3528) + ((Number(opts.legendMargin) || 12) * 0.3528 * 2)
+    : 0;
+
+  return {
+    cols: physical.cols,
+    rows: physical.rows,
+    widthMm: physical.widthMm,
+    heightMm: physical.heightMm + legendExtraMm,
+    widthPx: mmToPx(physical.widthMm, dpi),
+    heightPx: mmToPx(physical.heightMm + legendExtraMm, dpi),
+  };
 }
 
 function fontFaceCss(fontObj) {
@@ -152,29 +202,37 @@ function addOuterFrameToBaseSvg(baseSvg, opts) {
   const ex = expandGrid(xs, ys, dx, dy, opts.outerCols, opts.outerRows);
   const bgColor = opts.style?.bgColor ?? '#ffffff';
 
-  const x0 = ex.xs[0] - dx / 2;
-  const y0 = ex.ys[0] - dy / 2;
-  const width = (ex.xs[ex.xs.length - 1] - ex.xs[0]) + dx;
-  const height = (ex.ys[ex.ys.length - 1] - ex.ys[0]) + dy;
+  const physical = buildPhysicalCellCenters(ex.xs, ex.ys, opts);
+  const radius = (Math.min(physical.cellW, physical.cellH) * (Number(opts.dotDiameterRatio) || 0.75)) / 2;
+  const offX = Number(opts.dotOffsetXmm) || 0;
+  const offY = Number(opts.dotOffsetYmm) || 0;
 
-  let overlay = `<rect x="${x0}" y="${y0}" width="${width}" height="${height}" fill="${bgColor}"/>`;
+  let overlay = `<rect x="0" y="0" width="${physical.widthMm}" height="${physical.heightMm}" fill="${bgColor}"/>`;
   overlay += `<g fill="#000000">`;
+
+  const xIndexMap = new Map(ex.xs.map((v, i) => [v, i]));
+  const yIndexMap = new Map(ex.ys.map((v, i) => [v, i]));
 
   for (const y of ys) {
     for (const x of xs) {
       if (dotSet.has(`${x}_${y}`)) {
-        overlay += `<circle cx="${x}" cy="${y}" r="${DOT_RADIUS}"/>`;
+        const ix = xIndexMap.get(x);
+        const iy = yIndexMap.get(y);
+        const cx = physical.centersX[ix] + offX;
+        const cy = physical.centersY[iy] + offY;
+        overlay += `<circle cx="${cx}" cy="${cy}" r="${radius}"/>`;
       }
     }
   }
 
   overlay += `</g>`;
 
-  const out = baseSvg
-    .replace(/viewBox="[^"]*"/, `viewBox="${x0} ${y0} ${width} ${height}"`)
+  let out = baseSvg
+    .replace(/viewBox="[^"]*"/, `viewBox="0 0 ${physical.widthMm} ${physical.heightMm}"`)
     .replace(/<path[^>]*\/>/, overlay);
 
-  return forceSvgSize(out, opts.finalSize);
+  out = out.replace(/<svg\b/, `<svg width="${physical.widthMm}mm" height="${physical.heightMm}mm"`);
+  return out;
 }
 
 function buildReplacedSvgAdvanced(baseSvg, opts) {
@@ -185,22 +243,18 @@ function buildReplacedSvgAdvanced(baseSvg, opts) {
     fillFullGrid,
     singleGridTextMode,
     singleGridText,
-
     dotFontSize,
     emptyFontSize,
     dotFontFamily,
     emptyFontFamily,
-
     useEmbeddedFonts,
     dotEmbeddedFont,
     emptyEmbeddedFont,
-
     dotTextStrokeWidth,
     emptyTextStrokeWidth,
     dotTextStrokeColor,
     emptyTextStrokeColor,
     textStrokeJoin,
-
     useImages,
     dotUseImage,
     emptyUseImage,
@@ -214,7 +268,6 @@ function buildReplacedSvgAdvanced(baseSvg, opts) {
     emptyImageRotate,
     dotImageOpacity,
     emptyImageOpacity,
-
     style,
     showGrid,
   } = opts;
@@ -230,8 +283,7 @@ function buildReplacedSvgAdvanced(baseSvg, opts) {
   const xs = expanded.xs;
   const ys = expanded.ys;
   const dotSet = grid.dotSet;
-  const dx = grid.dx;
-  const dy = grid.dy;
+  const physical = buildPhysicalCellCenters(xs, ys, opts);
 
   const mainChars = [...String(replaceText ?? '').trim()];
   const emptyChars = [...String(emptyCellText ?? '').trim()];
@@ -240,13 +292,8 @@ function buildReplacedSvgAdvanced(baseSvg, opts) {
   const dotFS = Number(dotFontSize) || 5;
   const emptyFS = Number(emptyFontSize) || 4;
 
-  const dotFF = (useEmbeddedFonts && dotEmbeddedFont?.family)
-    ? dotEmbeddedFont.family
-    : (dotFontFamily || 'monospace');
-
-  const emptyFF = (useEmbeddedFonts && emptyEmbeddedFont?.family)
-    ? emptyEmbeddedFont.family
-    : (emptyFontFamily || 'monospace');
+  const dotFF = (useEmbeddedFonts && dotEmbeddedFont?.family) ? dotEmbeddedFont.family : (dotFontFamily || 'monospace');
+  const emptyFF = (useEmbeddedFonts && emptyEmbeddedFont?.family) ? emptyEmbeddedFont.family : (emptyFontFamily || 'monospace');
 
   const dotSW = Math.max(0, Number(dotTextStrokeWidth) || 0);
   const emptySW = Math.max(0, Number(emptyTextStrokeWidth) || 0);
@@ -256,16 +303,22 @@ function buildReplacedSvgAdvanced(baseSvg, opts) {
 
   const dotImgScale = Number(dotImageScale) || 1.0;
   const emptyImgScale = Number(emptyImageScale) || 1.0;
-  const imgWdot = dx * dotImgScale;
-  const imgHdot = dy * dotImgScale;
-  const imgWempty = dx * emptyImgScale;
-  const imgHempty = dy * emptyImgScale;
+
+  const imgWdot = physical.cellW * dotImgScale;
+  const imgHdot = physical.cellH * dotImgScale;
+  const imgWempty = physical.cellW * emptyImgScale;
+  const imgHempty = physical.cellH * emptyImgScale;
+
   const dotPAR = `xMidYMid ${dotImageFit || 'meet'}`;
   const emptyPAR = `xMidYMid ${emptyImageFit || 'meet'}`;
+
   const dotRot = Number(dotImageRotate) || 0;
   const emptyRot = Number(emptyImageRotate) || 0;
   const dotOp = Math.min(1, Math.max(0, Number(dotImageOpacity) || 1));
   const emptyOp = Math.min(1, Math.max(0, Number(emptyImageOpacity) || 1));
+
+  const offX = Number(opts.dotOffsetXmm) || 0;
+  const offY = Number(opts.dotOffsetYmm) || 0;
 
   let css = '';
   if (useEmbeddedFonts) {
@@ -273,23 +326,20 @@ function buildReplacedSvgAdvanced(baseSvg, opts) {
   }
 
   let svgWithFonts = injectDefsAndStyle(baseSvg, css);
+  svgWithFonts = svgWithFonts.replace(/viewBox="[^"]*"/, `viewBox="0 0 ${physical.widthMm} ${physical.heightMm}"`);
+  svgWithFonts = svgWithFonts.replace(/<svg\b/, `<svg width="${physical.widthMm}mm" height="${physical.heightMm}mm"`);
 
-  const x0 = xs[0] - dx / 2;
-  const y0 = ys[0] - dy / 2;
-  const width = (xs[xs.length - 1] - xs[0]) + dx;
-  const height = (ys[ys.length - 1] - ys[0]) + dy;
-
-  svgWithFonts = svgWithFonts.replace(/viewBox="[^"]*"/, `viewBox="${x0} ${y0} ${width} ${height}"`);
-
-  let overlay = `<rect x="${x0}" y="${y0}" width="${width}" height="${height}" fill="${bgColor}"/>`;
+  let overlay = `<rect x="0" y="0" width="${physical.widthMm}" height="${physical.heightMm}" fill="${bgColor}"/>`;
 
   if (showGrid) {
-    overlay += `<g fill="none" stroke="${gridColor}" stroke-width="0.35">`;
-    for (let x = x0; x <= x0 + width + 0.001; x += dx) {
-      overlay += `<line x1="${x}" y1="${y0}" x2="${x}" y2="${y0 + height}"/>`;
+    overlay += `<g fill="none" stroke="${gridColor}" stroke-width="0.05">`;
+    for (let i = 0; i <= physical.cols; i++) {
+      const x = i * physical.cellW;
+      overlay += `<line x1="${x}" y1="0" x2="${x}" y2="${physical.heightMm}"/>`;
     }
-    for (let y = y0; y <= y0 + height + 0.001; y += dy) {
-      overlay += `<line x1="${x0}" y1="${y}" x2="${x0 + width}" y2="${y}"/>`;
+    for (let j = 0; j <= physical.rows; j++) {
+      const y = j * physical.cellH;
+      overlay += `<line x1="0" y1="${y}" x2="${physical.widthMm}" y2="${y}"/>`;
     }
     overlay += `</g>`;
   }
@@ -299,25 +349,30 @@ function buildReplacedSvgAdvanced(baseSvg, opts) {
   let allIdx = 0;
   let content = '';
 
-  for (const y of ys) {
-    for (const x of xs) {
-      const isDot = dotSet.has(`${x}_${y}`);
+  for (let j = 0; j < ys.length; j++) {
+    for (let i = 0; i < xs.length; i++) {
+      const xOrig = xs[i];
+      const yOrig = ys[j];
+      const isDot = dotSet.has(`${xOrig}_${yOrig}`);
 
       if (!fillFullGrid && !isDot) continue;
 
+      const cx = physical.centersX[i] + (isDot ? offX : 0);
+      const cy = physical.centersY[j] + (isDot ? offY : 0);
+
       if (useImages) {
         if (isDot && (dotUseImage !== false) && dotImage?.dataUrl) {
-          const ix = x - imgWdot / 2;
-          const iy = y - imgHdot / 2;
-          const tf = dotRot ? ` transform="rotate(${dotRot} ${x} ${y})"` : '';
+          const ix = cx - imgWdot / 2;
+          const iy = cy - imgHdot / 2;
+          const tf = dotRot ? ` transform="rotate(${dotRot} ${cx} ${cy})"` : '';
           content += `<image x="${ix}" y="${iy}" width="${imgWdot}" height="${imgHdot}" href="${dotImage.dataUrl}" preserveAspectRatio="${dotPAR}" opacity="${dotOp}"${tf}/>`;
           continue;
         }
 
         if (!isDot && (emptyUseImage !== false) && emptyImage?.dataUrl) {
-          const ix = x - imgWempty / 2;
-          const iy = y - imgHempty / 2;
-          const tf = emptyRot ? ` transform="rotate(${emptyRot} ${x} ${y})"` : '';
+          const ix = cx - imgWempty / 2;
+          const iy = cy - imgHempty / 2;
+          const tf = emptyRot ? ` transform="rotate(${emptyRot} ${cx} ${cy})"` : '';
           content += `<image x="${ix}" y="${iy}" width="${imgWempty}" height="${imgHempty}" href="${emptyImage.dataUrl}" preserveAspectRatio="${emptyPAR}" opacity="${emptyOp}"${tf}/>`;
           continue;
         }
@@ -354,12 +409,12 @@ function buildReplacedSvgAdvanced(baseSvg, opts) {
         ? ` stroke="${sc}" stroke-width="${sw}" paint-order="stroke fill" stroke-linejoin="${join}"`
         : '';
 
-      content += `<text x="${x}" y="${y}" fill="${fill}" font-size="${fs}" font-family="${escapeXml(ff)}" text-anchor="middle" dominant-baseline="middle"${strokeAttrs}>${escapeXml(ch)}</text>`;
+      content += `<text x="${cx}" y="${cy}" fill="${fill}" font-size="${fs}" font-family="${escapeXml(ff)}" text-anchor="middle" dominant-baseline="middle"${strokeAttrs}>${escapeXml(ch)}</text>`;
     }
   }
 
   overlay += `<g>${content}</g>`;
-  return forceSvgSize(svgWithFonts.replace(/<path[^>]*\/>/, overlay), opts.finalSize);
+  return svgWithFonts.replace(/<path[^>]*\/>/, overlay);
 }
 
 function addLegendToSvg(svg, payload, opts) {
@@ -372,21 +427,19 @@ function addLegendToSvg(svg, payload, opts) {
   if (!vb) return svg;
 
   const [x, y, w, h] = vb[1].split(/\s+/).map(Number);
-  const extraH = legendFontSize + legendMargin * 2;
+  const extraH = (legendFontSize * 0.3528) + (legendMargin * 0.3528 * 2);
 
   svg = svg.replace(/viewBox="[^"]*"/, `viewBox="${x} ${y} ${w} ${h + extraH}"`);
 
-  const legendY = y + h + legendMargin + legendFontSize * 0.8;
+  const legendY = y + h + (legendMargin * 0.3528) + (legendFontSize * 0.3528 * 0.8);
   const legendX = x + w / 2;
-  const legend = `<text x="${legendX}" y="${legendY}" fill="#000000" font-size="${legendFontSize}" font-family="Arial" text-anchor="middle">${escapeXml(payload)}</text>`;
+  const legend = `<text x="${legendX}" y="${legendY}" fill="#000000" font-size="${legendFontSize * 0.3528}" font-family="Arial" text-anchor="middle">${escapeXml(payload)}</text>`;
 
   return svg.replace(/<\/svg>\s*$/, `${legend}</svg>`);
 }
 
 async function renderSvgs(opts) {
-  if (!opts?.payload?.trim()) {
-    throw new Error('El payload está vacío.');
-  }
+  if (!opts?.payload?.trim()) throw new Error('El payload está vacío.');
 
   let baseSvg = generateBaseSvg(opts);
   if (opts.outerOnBase) {
@@ -396,14 +449,13 @@ async function renderSvgs(opts) {
   let replacedSvg = buildReplacedSvgAdvanced(baseSvg, opts);
   replacedSvg = addLegendToSvg(replacedSvg, opts.payload, opts);
 
-  return { baseSvg, replacedSvg };
+  const metrics = buildMetrics(opts, opts.payload);
+  return { baseSvg, replacedSvg, metrics };
 }
 
 function incrementPayloadNumericEnd(payload, step, index) {
   const m = String(payload).match(/^(.*?)(\d+)$/);
-  if (!m) {
-    throw new Error('El payload inicial debe terminar en dígitos para modo "numeric-end".');
-  }
+  if (!m) throw new Error('El payload inicial debe terminar en dígitos para modo "numeric-end".');
 
   const prefix = m[1];
   const digits = m[2];
@@ -419,15 +471,9 @@ function incrementPayloadNumericSlice(payload, sliceStart, sliceLength, step, in
   const start = Number(sliceStart);
   const length = Number(sliceLength);
 
-  if (!Number.isInteger(start) || start < 0) {
-    throw new Error('Slice inicio inválido.');
-  }
-  if (!Number.isInteger(length) || length <= 0) {
-    throw new Error('Slice longitud inválida.');
-  }
-  if (start + length > text.length) {
-    throw new Error('El bloque numérico interno se sale del payload.');
-  }
+  if (!Number.isInteger(start) || start < 0) throw new Error('Slice inicio inválido.');
+  if (!Number.isInteger(length) || length <= 0) throw new Error('Slice longitud inválida.');
+  if (start + length > text.length) throw new Error('El bloque numérico interno se sale del payload.');
 
   const before = text.slice(0, start);
   const block = text.slice(start, start + length);
@@ -439,7 +485,6 @@ function incrementPayloadNumericSlice(payload, sliceStart, sliceLength, step, in
 
   const startNum = parseInt(block, 10);
   const value = startNum + (index * step);
-
   return before + String(value).padStart(length, '0') + after;
 }
 
@@ -447,12 +492,8 @@ function incrementPayloadParts(prefix, numberStart, width, suffix, step, index) 
   const startNum = Number(numberStart);
   const w = Number(width);
 
-  if (!Number.isFinite(startNum) || startNum < 0) {
-    throw new Error('Número inicial inválido en modo "parts".');
-  }
-  if (!Number.isFinite(w) || w <= 0) {
-    throw new Error('Ancho numérico inválido en modo "parts".');
-  }
+  if (!Number.isFinite(startNum) || startNum < 0) throw new Error('Número inicial inválido en modo "parts".');
+  if (!Number.isFinite(w) || w <= 0) throw new Error('Ancho numérico inválido en modo "parts".');
 
   const value = startNum + (index * step);
   return `${prefix || ''}${String(value).padStart(w, '0')}${suffix || ''}`;
@@ -496,14 +537,29 @@ function buildSequence(opts) {
   return out;
 }
 
-async function svgToPngBuffer(svg, dpi) {
-  return await sharp(Buffer.from(svg), { density: Number(dpi) || 300 })
-    .png()
-    .toBuffer();
+async function svgToPngBuffer(svg, dpi, widthPx, heightPx) {
+  let pipeline = sharp(Buffer.from(svg), { density: Number(dpi) || 300 });
+  if (widthPx && heightPx) {
+    pipeline = pipeline.resize({
+      width: Math.round(widthPx),
+      height: Math.round(heightPx),
+      fit: 'fill'
+    });
+  }
+  return await pipeline.png().toBuffer();
 }
 
-async function svgToTiff1BitBuffer(svg, dpi) {
-  return await sharp(Buffer.from(svg), { density: Number(dpi) || 300 })
+async function svgToTiff1BitBuffer(svg, dpi, widthPx, heightPx) {
+  let pipeline = sharp(Buffer.from(svg), { density: Number(dpi) || 300 });
+  if (widthPx && heightPx) {
+    pipeline = pipeline.resize({
+      width: Math.round(widthPx),
+      height: Math.round(heightPx),
+      fit: 'fill'
+    });
+  }
+
+  return await pipeline
     .flatten({ background: '#ffffff' })
     .threshold(128)
     .tiff({ compression: 'ccittfax4' })
@@ -517,9 +573,9 @@ async function saveSequenceOutput(opts) {
 
   const payloads = opts.sequenceMode ? buildSequence(opts) : [opts.payload];
 
-  if (!opts.outDir?.trim()) {
-    throw new Error('No se ha seleccionado carpeta de salida.');
-  }
+  if (!opts.outDir?.trim()) throw new Error('No se ha seleccionado carpeta de salida.');
+
+  const metrics = buildMetrics(opts, payloads[0]);
 
   if (format === 'pdf') {
     const outputPath = path.join(opts.outDir, `${prefix}.pdf`);
@@ -531,14 +587,13 @@ async function saveSequenceOutput(opts) {
       const renderOpts = { ...opts, payload };
       const { replacedSvg } = await renderSvgs(renderOpts);
 
-      const sizePx = Number(opts.finalSize) || 300;
-      const extraLegend = opts.printPayloadLegend ? 24 : 0;
-      const pt = sizePx * 72 / dpi;
+      const ptW = metrics.widthMm * 72 / 25.4;
+      const ptH = metrics.heightMm * 72 / 25.4;
 
-      doc.addPage({ size: [pt, pt + extraLegend], margin: 0 });
+      doc.addPage({ size: [ptW, ptH], margin: 0 });
       SVGtoPDF(doc, replacedSvg, 0, 0, {
-        width: pt,
-        height: pt + extraLegend,
+        width: ptW,
+        height: ptH,
         preserveAspectRatio: 'xMidYMid meet'
       });
     }
@@ -561,7 +616,7 @@ async function saveSequenceOutput(opts) {
       const payload = payloads[i];
       const renderOpts = { ...opts, payload };
       const { replacedSvg } = await renderSvgs(renderOpts);
-      const png = await svgToPngBuffer(replacedSvg, dpi);
+      const png = await svgToPngBuffer(replacedSvg, dpi, metrics.widthPx, metrics.heightPx);
 
       const base = opts.includePayloadInFilename
         ? `${prefix}_${safeFilePart(payload)}`
@@ -581,7 +636,7 @@ async function saveSequenceOutput(opts) {
       const payload = payloads[i];
       const renderOpts = { ...opts, payload };
       const { replacedSvg } = await renderSvgs(renderOpts);
-      const tiff = await svgToTiff1BitBuffer(replacedSvg, dpi);
+      const tiff = await svgToTiff1BitBuffer(replacedSvg, dpi, metrics.widthPx, metrics.heightPx);
 
       const base = opts.includePayloadInFilename
         ? `${prefix}_${safeFilePart(payload)}`
@@ -698,9 +753,7 @@ ipcMain.handle('render', async (_evt, opts) => {
 });
 
 ipcMain.handle('save-svgs', async (_evt, opts) => {
-  if (!opts?.outDir?.trim()) {
-    throw new Error('No se ha seleccionado carpeta de salida.');
-  }
+  if (!opts?.outDir?.trim()) throw new Error('No se ha seleccionado carpeta de salida.');
 
   const { baseSvg, replacedSvg } = await renderSvgs(opts);
 
